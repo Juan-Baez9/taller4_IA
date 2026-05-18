@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from planning.utils import Queue
+from collections import deque
 from planning.pddl import Action, Problem, apply_action, is_applicable
 
 
@@ -55,28 +57,20 @@ def hierarchicalSearch(problem: Problem, hlas: list[HLA]) -> list[Action]:
  
     Returns a list of primitive Action objects, or [] if no plan found.
     """
-    # El plan inicial es la lista de HLAs de alto nivel (una FullRescueMission por paciente,
-    # o simplemente los hlas que recibimos como punto de entrada)
     initial_plan = list(hlas)
- 
-    # Cola BFS: cada elemento es un plan (lista de HLA/Action)
     frontier = Queue()
     frontier.push(initial_plan)
- 
     visited_plans = set()
- 
+
     while not frontier.isEmpty():
         plan = frontier.pop()
- 
-        # Convertir a clave hashable para evitar ciclos
+
         plan_key = tuple(id(step) for step in plan)
         if plan_key in visited_plans:
             continue
         visited_plans.add(plan_key)
- 
-        # Caso base: plan completamente primitivo
+
         if is_plan_primitive(plan):
-            # Verificar que el plan alcanza el objetivo desde el estado inicial
             state = problem.getStartState()
             valid = True
             for action in plan:
@@ -88,93 +82,104 @@ def hierarchicalSearch(problem: Problem, hlas: list[HLA]) -> list[Action]:
             if valid and problem.isGoalState(state):
                 return plan
             continue
- 
-        # Encontrar el primer paso no primitivo
-        first_hla_index = next(
-            i for i, step in enumerate(plan) if not is_primitive(step)
-        )
-        hla = plan[first_hla_index]
- 
-        # Expandir cada refinamiento posible
+
+        first_idx = next(i for i, step in enumerate(plan) if not is_primitive(step))
+        hla = plan[first_idx]
+
         for refinement in hla.refinements:
-            # Construir nuevo plan reemplazando la HLA por su refinamiento
-            new_plan = plan[:first_hla_index] + list(refinement) + plan[first_hla_index + 1:]
+            new_plan = plan[:first_idx] + list(refinement) + plan[first_idx + 1:]
             frontier.push(new_plan)
- 
-    # No se encontró plan
+
     return []
+        
+def _bfs_path(start, goal, adjacency: dict) -> list | None:
+    if start == goal:
+        return [start]
+    frontier = deque([[start]])
+    visited = {start}
+    while frontier:
+        path = frontier.popleft()
+        current = path[-1]
+        for neighbor in adjacency.get(current, []):
+            if neighbor == goal:
+                return path + [neighbor]
+            if neighbor not in visited:
+                visited.add(neighbor)
+                frontier.append(path + [neighbor])
+    return None
+ 
+ 
+def _path_to_moves(robot, path: list) -> list:
+    return [_make_move(robot, path[i], path[i + 1]) for i in range(len(path) - 1)]
  
  
 # ---------------------------------------------------------------------------
-# Helpers para construir acciones primitivas
+# Helpers: acciones primitivas con fluentes como tuplas
 # ---------------------------------------------------------------------------
  
  
-def _make_move(robot: str, frm: str, to: str) -> Action:
-    """Crea una acción Move primitiva instanciada."""
+def _make_move(robot, frm, to) -> Action:
     return Action(
         name=f"Move({robot},{frm},{to})",
-        precond_pos=frozenset({f"At({robot},{frm})", f"Adjacent({frm},{to})", f"Free({to})"}),
-        precond_neg=frozenset(),
-        effect_add=frozenset({f"At({robot},{to})"}),
-        effect_del=frozenset({f"At({robot},{frm})"}),
+        precond_pos=[("At", robot, frm), ("Adjacent", frm, to), ("Free", to)],
+        precond_neg=[],
+        add_list=[("At", robot, to), ("Free", frm)],
+        del_list=[("At", robot, frm), ("Free", to)],
     )
  
  
-def _make_pickup(robot: str, obj: str, loc: str) -> Action:
+def _make_pickup(robot, obj, loc) -> Action:
     return Action(
         name=f"PickUp({robot},{obj},{loc})",
-        precond_pos=frozenset({
-            f"At({robot},{loc})",
-            f"At({obj},{loc})",
-            f"HandsFree({robot})",
-            f"Pickable({obj})",
-        }),
-        precond_neg=frozenset(),
-        effect_add=frozenset({f"Holding({robot},{obj})"}),
-        effect_del=frozenset({f"At({obj},{loc})", f"HandsFree({robot})"}),
+        precond_pos=[
+            ("At", robot, loc),
+            ("At", obj, loc),
+            ("HandsFree", robot),
+            ("Pickable", obj),
+        ],
+        precond_neg=[],
+        add_list=[("Holding", robot, obj)],
+        del_list=[("At", obj, loc), ("HandsFree", robot)],
     )
  
  
-def _make_putdown(robot: str, obj: str, loc: str) -> Action:
+def _make_putdown(robot, obj, loc) -> Action:
     return Action(
         name=f"PutDown({robot},{obj},{loc})",
-        precond_pos=frozenset({f"At({robot},{loc})", f"Holding({robot},{obj})"}),
-        precond_neg=frozenset(),
-        effect_add=frozenset({f"At({obj},{loc})", f"HandsFree({robot})"}),
-        effect_del=frozenset({f"Holding({robot},{obj})"}),
+        precond_pos=[("At", robot, loc), ("Holding", robot, obj)],
+        precond_neg=[],
+        add_list=[("At", obj, loc), ("HandsFree", robot)],
+        del_list=[("Holding", robot, obj)],
     )
  
  
-def _make_rescue(robot: str, patient: str, loc: str) -> Action:
+def _make_rescue(robot, patient, loc) -> Action:
     return Action(
         name=f"Rescue({robot},{patient},{loc})",
-        precond_pos=frozenset({
-            f"At({robot},{loc})",
-            f"At({patient},{loc})",
-            f"MedicalPost({loc})",
-            f"SuppliesReady({loc})",
-        }),
-        precond_neg=frozenset(),
-        effect_add=frozenset({f"Rescued({patient})"}),
-        effect_del=frozenset({f"At({patient},{loc})"}),
+        precond_pos=[
+            ("At", robot, loc),
+            ("At", patient, loc),
+            ("MedicalPost", loc),
+            ("SuppliesReady", loc),
+        ],
+        precond_neg=[],
+        add_list=[("Rescued", patient)],
+        del_list=[("At", patient, loc)],
     )
  
  
-def _make_setup_supplies(robot: str, supplies: str, loc: str) -> Action:
+def _make_setup_supplies(robot, supplies, loc) -> Action:
     return Action(
         name=f"SetupSupplies({robot},{supplies},{loc})",
-        precond_pos=frozenset({
-            f"At({robot},{loc})",
-            f"At({supplies},{loc})",
-            f"MedicalPost({loc})",
-            f"Holding({robot},{supplies})",
-        }),
-        precond_neg=frozenset(),
-        effect_add=frozenset({f"SuppliesReady({loc})", f"HandsFree({robot})"}),
-        effect_del=frozenset({f"Holding({robot},{supplies})"}),
+        precond_pos=[
+            ("At", robot, loc),
+            ("MedicalPost", loc),
+            ("Holding", robot, supplies),
+        ],
+        precond_neg=[],
+        add_list=[("SuppliesReady", loc), ("HandsFree", robot), ("At", supplies, loc)],
+        del_list=[("Holding", robot, supplies)],
     )
-    ### End of your code ###
 
 
 # ---------------------------------------------------------------------------
@@ -199,246 +204,88 @@ def build_htn_hierarchy(problem: Problem) -> list[HLA]:
          with primitive PickUp, SetupSupplies, PutDown, and Rescue actions.
     """
     ### Your code here ###
-    state = problem.getStartState()
-    fluents = state.fluents  # frozenset de strings
- 
+    state: frozenset = problem.getStartState()
+    objects: dict = problem.objects
 
-    robots, cells, supplies_list, patients, medical_posts = [], [], [], [], []
-    adjacencies: dict[str, list[str]] = {}  # celda -> vecinos adyacentes
- 
-    for f in fluents:
-        if f.startswith("At("):
-            inner = f[3:-1]
-            parts = inner.split(",", 1)
-            if len(parts) == 2:
-                entity, loc = parts
-                if entity not in cells:
-                    cells.append(entity)
-                if loc not in cells:
-                    cells.append(loc)
- 
-        if f.startswith("Adjacent("):
-            inner = f[9:-1]
-            a, b = inner.split(",", 1)
-            adjacencies.setdefault(a, []).append(b)
- 
-        if f.startswith("MedicalPost("):
-            loc = f[12:-1]
-            if loc not in medical_posts:
-                medical_posts.append(loc)
- 
-    for f in fluents:
-        if f.startswith("At("):
-            inner = f[3:-1]
-            entity, _ = inner.split(",", 1)
-            if f"HandsFree({entity})" in fluents or any(
-                g.startswith(f"At({entity},") for g in fluents
-            ):
-                
-                pass
-            if f"Pickable({entity})" in fluents:
-            
-                pass
+    robots = objects.get("robots", [])
+    cells = objects.get("cells", [])
+    supplies_list = objects.get("supplies", [])
+    patients = objects.get("patients", [])
 
-    for f in fluents:
-        if f.startswith("HandsFree("):
-            robot = f[10:-1]
-            if robot not in robots:
-                robots.append(robot)
- 
-    for f in fluents:
-        if f.startswith("At("):
-            inner = f[3:-1]
-            entity, loc = inner.split(",", 1)
-            if entity not in robots and f"Pickable({entity})" in fluents:
-                
-                pass
- 
+    adjacency: dict = {cell: [] for cell in cells}
+    for f in state:
+        if isinstance(f, tuple) and len(f) == 3 and f[0] == "Adjacent":
+            if f[1] in adjacency:
+                adjacency[f[1]].append(f[2])
 
-    supplies_list = getattr(problem, 'supplies', [])
-    patients = getattr(problem, 'patients', [])
-    robot = robots[0] if robots else "R"
- 
+    medical_posts = []
+    for f in state:
+        if isinstance(f, tuple) and len(f) == 2 and f[0] == "MedicalPost":
+            medical_posts.append(f[1])
 
-    if not supplies_list or not patients:
-        pickable_entities = []
-        for f in fluents:
-            if f.startswith("At("):
-                inner = f[3:-1]
-                entity, _ = inner.split(",", 1)
-                if entity not in robots and f"Pickable({entity})" in fluents:
-                    pickable_entities.append(entity)
- 
-        
-        if not supplies_list:
-            supplies_list = [e for e in pickable_entities if e.startswith("T") or e.startswith("t") or e.lower().startswith("supply")]
-        if not patients:
-            patients = [e for e in pickable_entities if e.startswith("S") or e.lower().startswith("patient") or e.lower().startswith("survivor")]
- 
-        #si aun no podemos distinguir, asignamos la primera mitad como suministros
-        if not supplies_list and not patients and pickable_entities:
-            mid = max(1, len(pickable_entities) // 2)
-            supplies_list = pickable_entities[:mid]
-            patients = pickable_entities[mid:]
- 
+    robot = robots[0] if robots else None
     medical_post = medical_posts[0] if medical_posts else None
- 
-    #HLA Navigate(from, to): un refinamiento por cada celda adyacente directa
-    #creamos Navigate como función que genera el HLA correspondiente
-    
-    navigate_hlas: dict[tuple[str, str], HLA] = {}
- 
-  
-    for cell_a, neighbors in adjacencies.items():
-        for cell_b in neighbors:
-            key = (cell_a, cell_b)
-            move_action = _make_move(robot, cell_a, cell_b)
-            nav_hla = HLA(
-                name=f"Navigate({cell_a},{cell_b})",
-                refinements=[[move_action]], 
-            )
-            navigate_hlas[key] = nav_hla
- 
-    
-    all_cells = list(adjacencies.keys())
- 
-    for cell_a in all_cells:
-        for cell_b in all_cells:
-            if cell_a == cell_b:
-                continue
-            if (cell_a, cell_b) in navigate_hlas:
-                continue  
-            
-            for mid in adjacencies.get(cell_a, []):
-                if cell_b in adjacencies.get(mid, []):
-                    
-                    nav_ab = HLA(name=f"Navigate({cell_a},{cell_b})", refinements=[])
-                    navigate_hlas[(cell_a, cell_b)] = nav_ab
-                    break
- 
-    
-    for (cell_a, cell_b), hla_ab in navigate_hlas.items():
-        if hla_ab.refinements:
-            continue  
-        for mid in adjacencies.get(cell_a, []):
-            if (mid, cell_b) in navigate_hlas:
-                nav_a_mid = navigate_hlas[(cell_a, mid)]
-                nav_mid_b = navigate_hlas[(mid, cell_b)]
-                hla_ab.refinements.append([nav_a_mid, nav_mid_b])
- 
-    
-    def get_location(entity: str) -> str | None:
-        for f in fluents:
-            if f == f"At({entity},{{}})".format(""):
-                pass
-        for f in fluents:
-            if f.startswith(f"At({entity},"):
-                return f[len(f"At({entity},"):-1]
+
+    if robot is None or medical_post is None:
+        return []
+
+    def get_location(entity):
+        for f in state:
+            if isinstance(f, tuple) and len(f) == 3 and f[0] == "At" and f[1] == entity:
+                return f[2]
         return None
- 
-    # HLA PrepareSupplies(supplies, medical_post)
-    # Refinamiento: Navigate(robot_loc, supplies_loc) + PickUp + Navigate(supplies_loc, post) + SetupSupplies
 
-    prepare_hlas = []
- 
-    for s in supplies_list:
-        if medical_post is None:
-            continue
+    def make_navigate(frm, to) -> HLA:
+        path = _bfs_path(frm, to, adjacency)
+        if path is None or len(path) < 2:
+            return HLA(f"Navigate({frm},{to})", refinements=[])
+        moves = _path_to_moves(robot, path)
+        return HLA(f"Navigate({frm},{to})", refinements=[moves])
+
+    full_mission_hlas = []
+
+    for s, p in zip(supplies_list, patients):
         s_loc = get_location(s)
-        r_loc = get_location(robot)
- 
-        if s_loc is None or r_loc is None:
-            continue
- 
-        refinements = []
-        steps = []
-
-        if r_loc != s_loc and (r_loc, s_loc) in navigate_hlas:
-            steps.append(navigate_hlas[(r_loc, s_loc)])
-        elif r_loc != s_loc:
-            nav = HLA(f"Navigate({r_loc},{s_loc})", refinements=[])
-            navigate_hlas[(r_loc, s_loc)] = nav
-            steps.append(nav)
- 
-        steps.append(_make_pickup(robot, s, s_loc))
- 
-        if s_loc != medical_post and (s_loc, medical_post) in navigate_hlas:
-            steps.append(navigate_hlas[(s_loc, medical_post)])
-        elif s_loc != medical_post:
-            nav = HLA(f"Navigate({s_loc},{medical_post})", refinements=[])
-            navigate_hlas[(s_loc, medical_post)] = nav
-            steps.append(nav)
- 
-        steps.append(_make_setup_supplies(robot, s, medical_post))
- 
-        refinements.append(steps)
- 
-        prepare_hla = HLA(
-            name=f"PrepareSupplies({s},{medical_post})",
-            refinements=refinements,
-        )
-        prepare_hlas.append(prepare_hla)
- 
-    # HLA ExtractPatient(patient, medical_post)
-    # Refinamiento: Navigate(robot_loc, patient_loc) + PickUp(patient) + Navigate(patient_loc, post) + PutDown
-
-    extract_hlas = []
- 
-    for p in patients:
-        if medical_post is None:
-            continue
         p_loc = get_location(p)
         r_loc = get_location(robot)
- 
-        if p_loc is None or r_loc is None:
+
+        if s_loc is None or p_loc is None or r_loc is None:
             continue
- 
-        refinements = []
-        steps = []
- 
-        if r_loc != p_loc and (r_loc, p_loc) in navigate_hlas:
-            steps.append(navigate_hlas[(r_loc, p_loc)])
-        elif r_loc != p_loc:
-            nav = HLA(f"Navigate({r_loc},{p_loc})", refinements=[])
-            navigate_hlas[(r_loc, p_loc)] = nav
-            steps.append(nav)
- 
-        steps.append(_make_pickup(robot, p, p_loc))
- 
-        if p_loc != medical_post and (p_loc, medical_post) in navigate_hlas:
-            steps.append(navigate_hlas[(p_loc, medical_post)])
-        elif p_loc != medical_post:
-            nav = HLA(f"Navigate({p_loc},{medical_post})", refinements=[])
-            navigate_hlas[(p_loc, medical_post)] = nav
-            steps.append(nav)
- 
-        steps.append(_make_putdown(robot, p, medical_post))
- 
-        refinements.append(steps)
- 
+
+        # --- PrepareSupplies ---
+        prep_steps = []
+        if r_loc != s_loc:
+            prep_steps.append(make_navigate(r_loc, s_loc))
+        prep_steps.append(_make_pickup(robot, s, s_loc))
+        if s_loc != medical_post:
+            prep_steps.append(make_navigate(s_loc, medical_post))
+        prep_steps.append(_make_setup_supplies(robot, s, medical_post))
+
+        prepare_hla = HLA(
+            name=f"PrepareSupplies({s},{medical_post})",
+            refinements=[prep_steps],
+        )
+
+        # --- ExtractPatient ---
+        extract_steps = []
+        if medical_post != p_loc:
+            extract_steps.append(make_navigate(medical_post, p_loc))
+        extract_steps.append(_make_pickup(robot, p, p_loc))
+        if p_loc != medical_post:
+            extract_steps.append(make_navigate(p_loc, medical_post))
+        extract_steps.append(_make_putdown(robot, p, medical_post))
+
         extract_hla = HLA(
             name=f"ExtractPatient({p},{medical_post})",
-            refinements=refinements,
+            refinements=[extract_steps],
         )
-        extract_hlas.append(extract_hla)
- 
-    #HLA FullRescueMission(supplies, patient, medical_post)
-    #eefinamiento: PrepareSupplies + ExtractPatient + Rescue
-    
-    full_mission_hlas = []
- 
-    for (prepare_hla, extract_hla) in zip(prepare_hlas, extract_hlas):
-        s = prepare_hla.name.split("(")[1].split(",")[0]
-        p = extract_hla.name.split("(")[1].split(",")[0]
- 
+
+        # --- FullRescueMission ---
         rescue_action = _make_rescue(robot, p, medical_post)
- 
         full_mission = HLA(
             name=f"FullRescueMission({s},{p},{medical_post})",
-            refinements=[
-                [prepare_hla, extract_hla, rescue_action]
-            ],
+            refinements=[[prepare_hla, extract_hla, rescue_action]],
         )
         full_mission_hlas.append(full_mission)
-    return full_mission_hlas if full_mission_hlas else list(navigate_hlas.values())
-    ### End of your code ###
+
+    return full_mission_hlas
