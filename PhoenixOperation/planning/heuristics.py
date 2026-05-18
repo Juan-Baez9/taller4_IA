@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from planning.pddl import ActionSchema, State, Objects
+from planning.pddl import ActionSchema, State, Objects, get_all_groundings
 
 
 def nullHeuristic(
@@ -45,6 +45,32 @@ def ignorePreconditionsHeuristic(
          Remember: with no preconditions, every grounding is "applicable".
     """
     ### Your code here ###
+    unsatisfied = list(goal - state)
+    if not unsatisfied:
+        return 0
+
+    goal_index = {fluent: index for index, fluent in enumerate(unsatisfied)}
+    full_mask = (1 << len(unsatisfied)) - 1
+    cover_masks = []
+
+    for action in get_all_groundings(domain, objects):
+        mask = 0
+        for fluent in action.add_list & goal:
+            if fluent in goal_index:
+                mask |= 1 << goal_index[fluent]
+        if mask:
+            cover_masks.append(mask)
+
+    distances = [float("inf")] * (full_mask + 1)
+    distances[0] = 0
+    for mask in range(full_mask + 1):
+        if distances[mask] == float("inf"):
+            continue
+        for cover_mask in cover_masks:
+            next_mask = mask | cover_mask
+            distances[next_mask] = min(distances[next_mask], distances[mask] + 1)
+
+    return distances[full_mask]
 
     ### End of your code ###
 
@@ -79,5 +105,37 @@ def ignoreDeleteListsHeuristic(
          each step (preconditions still apply in the relaxed model).
     """
     ### Your code here ###
+    relaxed_state = frozenset(state)
+    if goal.issubset(relaxed_state):
+        return 0
+
+    steps = 0
+    actions = get_all_groundings(domain, objects)
+
+    while not goal.issubset(relaxed_state):
+        applicable_actions = [
+            action
+            for action in actions
+            if action.precond_pos.issubset(relaxed_state)
+            and action.precond_neg.isdisjoint(relaxed_state)
+        ]
+        improving_actions = [
+            action for action in applicable_actions if action.add_list - relaxed_state
+        ]
+        if not improving_actions:
+            return float("inf")
+
+        best_action = max(
+            improving_actions,
+            key=lambda action: (
+                len(goal & (relaxed_state | action.add_list)),
+                len(action.add_list - relaxed_state),
+                action.name,
+            ),
+        )
+        relaxed_state = frozenset(relaxed_state | best_action.add_list)
+        steps += 1
+
+    return steps
 
     ### End of your code ###

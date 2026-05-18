@@ -8,7 +8,9 @@ from planning.pddl import (
     Problem,
     State,
     Objects,
+    apply_action,
     get_all_groundings,
+    is_applicable,
 )
 from planning.utils import Queue, PriorityQueue
 from planning.heuristics import nullHeuristic
@@ -165,6 +167,18 @@ def regress(goal_set: State, action: Action) -> State | None:
     """
     ### Your code here ###
 
+    if action.add_list.isdisjoint(goal_set):
+        return None
+
+    if not action.del_list.isdisjoint(goal_set):
+        return None
+
+    new_goal = (goal_set - action.add_list) | action.precond_pos
+    if not action.precond_neg.isdisjoint(new_goal):
+        return None
+
+    return frozenset(new_goal)
+
     ### End of your code ###
 
 
@@ -187,6 +201,121 @@ def backwardSearch(problem: Problem) -> list[Action]:
          Pickable) that are false in the initial state — these are dead ends.
     """
     ### Your code here ###
+    static_predicates = {"MedicalPost", "Adjacent", "Pickable"}
+    all_actions = get_all_groundings(problem.domain, problem.objects)
+    actions_by_add: dict[tuple, list[Action]] = {}
+    for action in all_actions:
+        for fluent in action.add_list:
+            actions_by_add.setdefault(fluent, []).append(action)
+
+    # Funciones auxiliares para backwardSearch.
+    def has_false_static_goal(goal_set: State) -> bool:
+        return any(
+            fluent[0] in static_predicates and fluent not in problem.initial_state
+            for fluent in goal_set
+        )
+
+    def has_inconsistent_goal(goal_set: State) -> bool:
+        at_locations: dict[object, object] = {}
+        holdings: dict[object, object] = {}
+        hands_free = set()
+        held_objects = set()
+        object_locations = set()
+        robot_locations = set()
+        free_cells = set()
+
+        for fluent in goal_set:
+            predicate = fluent[0]
+            if predicate == "At":
+                entity, loc = fluent[1], fluent[2]
+                if entity in at_locations and at_locations[entity] != loc:
+                    return True
+                at_locations[entity] = loc
+                object_locations.add(entity)
+                if entity in problem.objects["robots"]:
+                    robot_locations.add(loc)
+            elif predicate == "Holding":
+                robot, obj = fluent[1], fluent[2]
+                if robot in holdings and holdings[robot] != obj:
+                    return True
+                holdings[robot] = obj
+                held_objects.add(obj)
+            elif predicate == "HandsFree":
+                hands_free.add(fluent[1])
+            elif predicate == "Free":
+                free_cells.add(fluent[1])
+
+        if any(robot in hands_free for robot in holdings):
+            return True
+        if held_objects & object_locations:
+            return True
+        if free_cells & robot_locations:
+            return True
+        return False
+
+    def is_valid_forward_plan(plan: list[Action]) -> bool:
+        state = problem.initial_state
+        for action in plan:
+            if not is_applicable(state, action):
+                return False
+            state = apply_action(state, action)
+        return problem.isGoalState(state)
+
+    def action_rank(action: Action) -> int:
+        ranks = {
+            "Rescue": 0,
+            "PutDown": 1,
+            "SetupSupplies": 1,
+            "PickUp": 2,
+            "Move": 3,
+        }
+        return ranks.get(action.name.split("(", 1)[0], 4)
+
+    frontier = PriorityQueue()
+    start_goal = frozenset(problem.goal)
+    frontier.push((start_goal, []), 0)
+    best_depth = {start_goal: 0}
+
+    while not frontier.isEmpty():
+        goal_set, reversed_plan = frontier.pop()
+        problem._expanded += 1
+
+        if goal_set.issubset(problem.initial_state):
+            plan = list(reversed(reversed_plan))
+            if is_valid_forward_plan(plan):
+                return plan
+            continue
+
+        unsatisfied_goals = goal_set - problem.initial_state
+        relevant_actions: dict[str, Action] = {}
+        for fluent in sorted(unsatisfied_goals, key=str):
+            for action in actions_by_add.get(fluent, []):
+                relevant_actions[action.name] = action
+
+        for action in sorted(
+            relevant_actions.values(),
+            key=lambda a: (action_rank(a), a.name),
+        ):
+
+            new_goal = regress(goal_set, action)
+            if new_goal is None:
+                continue
+            if has_false_static_goal(new_goal) or has_inconsistent_goal(new_goal):
+                continue
+
+            new_reversed_plan = reversed_plan + [action]
+            new_depth = len(new_reversed_plan)
+            if new_depth >= best_depth.get(new_goal, float("inf")):
+                continue
+
+            best_depth[new_goal] = new_depth
+            remaining = len(new_goal - problem.initial_state)
+            frontier.push(
+                (new_goal, new_reversed_plan),
+                new_depth + remaining + action_rank(action) / 10,
+            )
+
+    return []
 
     ### End of your code ###
 
@@ -216,6 +345,39 @@ def aStarPlanner(
          Track the best g-cost seen for each state to avoid stale expansions.
     """
     ### Your code here ###
+    start_state = problem.getStartState()
+    frontier = PriorityQueue()
+    frontier.push(
+        (start_state, [], 0),
+        heuristic(start_state, problem.goal, problem.domain, problem.objects),
+    )
+    best_cost = {start_state: 0}
+
+    while not frontier.isEmpty():
+        state, plan, cost = frontier.pop()
+
+        if cost > best_cost.get(state, float("inf")):
+            continue
+
+        if problem.isGoalState(state):
+            return plan
+
+        for next_state, action, step_cost in problem.getSuccessors(state):
+            next_cost = cost + step_cost
+            if next_cost >= best_cost.get(next_state, float("inf")):
+                continue
+
+            best_cost[next_state] = next_cost
+            next_plan = plan + [action]
+            estimate = heuristic(
+                next_state,
+                problem.goal,
+                problem.domain,
+                problem.objects,
+            )
+            frontier.push((next_state, next_plan, next_cost), next_cost + estimate)
+
+    return []
 
     ### End of your code ###
 
